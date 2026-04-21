@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title></title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body {
+            background-color: #ccc;
+            color: #000;
+        }
+
+        a {
+            color: #f00;
+        }
+    </style>
+</head>
+
+<body>
+
+    <script type="x-shader/x-vertex" id="elevationVertex">
+    varying vec2 vUv;
+    varying vec3 vColor;
+    uniform sampler2D tex;
+    uniform float scaleElevation;
+    uniform int uMode; // if == 0: RGB, 1: HSV, 2: XYZ, 3: xyY, 4: CIELAB, 5: CIELCH
+    uniform int uComponent; // 0, 1, and 2 for different components in each color space
+    
+    varying float vLightIntensityFactor; // to pass calculated lighting to fragment part
+
+    uniform vec3 uLightDirection; // uniform for lightning direction vector
+    uniform float uId; // intensity of the light source
+    uniform vec3 uLightColor; // color of the light source
+
+    float srgbToLrgb(float c) {
+        return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+    }
+
+    vec3 rgb2hsv(vec3 c) {
+        float r = c.r;
+        float g = c.g;
+        float b = c.b;
+    
+        float cMax = max(r, max(g, b));
+        float cMin = min(r, min(g, b));
+        float delta = cMax - cMin;
+    
+        float h = 0.0;
+        float s = 0.0;
+        float v = cMax;
+    
+        if (cMax > 0.0) {
+            s = delta / cMax;
+        } else {
+            s = 0.0;
+        }
+    
+        if (delta > 0.0) {
+            if (cMax == r) {
+                h = (g - b) / delta;
+                h = mod(h, 6.0); 
+            } else if (cMax == g) {
+                h = ((b - r) / delta) + 2.0;
+            } else { // cMax == b
+                h = ((r - g) / delta) + 4.0;
+            }
+            
+            h /= 6.0;
+            
+            if (h < 0.0) {
+                h += 1.0;
+            }
+        } else {
+            h = 0.0;
+        }
+    
+        return vec3(h, s, v);
+    }
+
+    vec3 rgb2xyz(vec3 c) {
+        float r = srgbToLrgb(c.r);
+        float g = srgbToLrgb(c.g);
+        float b = srgbToLrgb(c.b);
+
+        float x = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b;
+        float y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+        float z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b;
+
+        return vec3(x, y, z);
+    }
+
+    float helpf(float t) {
+        float delta = 6.0 / 29.0;
+        return (t > pow(delta, 3.0)) ? pow(t, 1.0/3.0) : t / (3.0 * pow(delta, 2.0)) + 4.0/29.0;
+    }
+
+    vec3 xyz2lab(vec3 xyz) {
+        float Xn = 0.95047, Yn = 1.0000001, Zn = 1.08883;
+
+        float fX = helpf(xyz.x / Xn);
+        float fY = helpf(xyz.y / Yn);
+        float fZ = helpf(xyz.z / Zn);
+
+        return vec3(116.0 * fY - 16.0, 500.0 * (fX - fY), 200.0 * (fY - fZ));
+    }
+
+    // this function help to get the height(field) of the texture coordinate (input)    
+    float getHeight(vec2 uv) {
+        vec3 rgb = texture2D(tex, uv).rgb;
+        float h = 0.0;
+        if (uMode == 0) {
+            h = (uComponent == 0) ? rgb.r : (uComponent == 1) ? rgb.g : rgb.b;
+        } else if (uMode == 1) {
+            vec3 hsv = rgb2hsv(rgb);
+            h = (uComponent == 0) ? hsv.x : (uComponent == 1) ? hsv.y : hsv.z;
+        } else if (uMode == 2) {
+            vec3 xyz = rgb2xyz(rgb);
+            h = (uComponent == 0) ? xyz.x / 0.95047 : (uComponent == 1) ? xyz.y : xyz.z / 1.08883;
+        } else if (uMode == 3) {
+            vec3 xyz = rgb2xyz(rgb);
+            float sum = xyz.x + xyz.y + xyz.z;
+            h = (sum > 0.0) ? ((uComponent == 0) ? xyz.x/sum : (uComponent == 1) ? xyz.y/sum : xyz.y) : 0.0;
+        } else if (uMode == 4) {
+            vec3 lab = xyz2lab(rgb2xyz(rgb));
+            if(uComponent == 0) h = lab.x / 100.0;
+            else if(uComponent == 1) h = (lab.y + 128.0) / 255.0;
+            else h = (lab.z + 128.0) / 255.0;
+        } else if (uMode == 5) {
+            vec3 lab = xyz2lab(rgb2xyz(rgb));
+            float C = length(lab.yz);
+            float H = atan(lab.z, lab.y);
+            if (H < 0.0) H += 6.283185;
+            if(uComponent == 0) h = lab.x / 100.0;
+            else if(uComponent == 1) h = C / 181.019;
+            else h = H / 6.283185;
+        }
+        return h * scaleElevation;
+    }
+
+    void main() {
+        vUv = uv;
+        vec3 rgb = texture2D(tex, vUv).rgb;
+        vColor = rgb;
+
+        // height calcultion for the current element
+        float h = getHeight(vUv);
+
+        // normal estimation part
+        // values
+        float eps = 0.005; 
+        float h_uplus  = getHeight(vUv + vec2(eps, 0.0));
+        float h_uminus = getHeight(vUv - vec2(eps, 0.0));
+        float h_vplus  = getHeight(vUv + vec2(0.0, eps));
+        float h_vminus = getHeight(vUv - vec2(0.0, eps));
+        // derivate calculation
+        float dhdu = (h_uplus - h_uminus) / (2.0 * eps);
+        float dhdv = (h_vplus - h_vminus) / (2.0 * eps);
+        // normalizing the vector
+        vec3 N = normalize(vec3(-dhdu, -dhdv, 1.0));
+
+        // normalizing light direction
+        vec3 L = normalize(uLightDirection);
+
+        // lambertian model reflectance is calculated with I = Id * kd * max(0, N . L)
+        // here we have Id * max(0, N . L)
+        vLightIntensityFactor = uId * max(0.0, dot(N, L));
+        
+
+        vec3 pos = position;
+        pos.z += h;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+    </script>
+
+    <script type="x-shader/x-fragment" id="elevationFragment">
+    varying vec2 vUv;
+    varying vec3 vColor;
+
+    varying float vLightIntensityFactor; // to pass calculated lighting to fragment part
+    uniform vec3 uLightColor; // color of the light source
+
+    uniform float uAmbientFactor; // for ambient light
+
+    void main() {
+        // lambertian model reflectance is calculated with I = Id * kd * max(0, N . L)
+        // color of the fragment is the spectral reflentance kd
+        // final color = color of the fragment * (ambient term + lambertian term)
+        vec3 ambient = vColor * uAmbientFactor; // ambient term is uAmbientFactor% of the base rgb color of the fragment
+        vec3 diffuse = vColor * uLightColor * vLightIntensityFactor;
+        gl_FragColor = vec4(ambient + diffuse, 1.0);
+    }
+    </script>
+
+    <script type="importmap">
+    {
+    "imports": {
+        "three": "https://unpkg.com/three@0.183.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.183.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+        import { BoxLineGeometry } from 'three/addons/geometries/BoxLineGeometry.js';
+
+        // for VR
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { HTMLMesh } from 'three/addons/interactive/HTMLMesh.js';
+        import { InteractiveGroup } from 'three/addons/interactive/InteractiveGroup.js';
+        import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+        import Stats from 'three/addons/libs/stats.module.js'; // stats
+
+        let scene, camera, renderer, controls, video, videoTexture, imageTexture;
+        let elevationMesh, baseMesh;
+        let room;
+        let playPauseBtn;
+        let sceneLight;
+        let lightSphere, lightArrow;
+
+        // for VR
+        let guiMesh;
+        let stats, statsMesh; // stats
+
+        let currentParams = {
+            source: 'Image',
+            space: 'RGB',
+            component: 'R',
+            elevation: 1.5,
+            togglePlay: function () {
+                if (video.paused) {
+                    video.play();
+                } else {
+                    video.pause();
+                }
+                updatePlayPauseLabel();
+            },
+            forward10: () => video.currentTime += 10,
+            Id: 0.8, // intensity of the light source
+            lightX: -1, // light direction
+            lightY: 3, // light direction
+            lightZ: -1, // light direction
+            lightColor: '#ffffff', // color of the light source
+            uAmbientFactor: 0.3, // ambient term percent
+        };
+
+        const spaces = {
+            'RGB': { mode: 0, comps: ['R', 'G', 'B'] },
+            'HSV': { mode: 1, comps: ['H', 'S', 'V'] },
+            'CIEXYZ': { mode: 2, comps: ['X', 'Y', 'Z'] },
+            'CIExyY': { mode: 3, comps: ['x', 'y', 'Y'] },
+            'CIELAB': { mode: 4, comps: ['L', 'a', 'b'] },
+            'CIELCH': { mode: 5, comps: ['L', 'C', 'H'] }
+        };
+
+        init();
+
+        function init() {
+            // setting up the scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x222233);
+
+            // camera setup
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 50);
+            // for VR, changed
+            camera.position.set(0, 1.6, 3);
+            camera.up.set(0, 1, 0);
+
+            // renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            // for VR + button
+            renderer.autoClear = false;
+            renderer.setPixelRatio( window.devicePixelRatio );
+            renderer.setSize( window.innerWidth, window.innerHeight );
+            renderer.setAnimationLoop( animate );
+            renderer.xr.enabled = true;
+            document.body.appendChild( VRButton.createButton( renderer ) );
+
+            // controls
+            // for VR, commented
+            // controls = new OrbitControls(camera, renderer.domElement);
+            // controls.enableDamping = true;
+            // controls.dampingFactor = 0.05;
+            // controls.screenSpacePanning = true;
+            // controls.minDistance = 1;
+            // controls.maxDistance = 50;
+
+            // for VR controllers
+            const geometry = new THREE.BufferGeometry();
+            geometry.setFromPoints( [ new THREE.Vector3( 0, 0, 0 ), new THREE.Vector3( 0, 0, - 5 ) ] );
+            const controller1 = renderer.xr.getController( 0 );
+            controller1.add( new THREE.Line( geometry ) );
+            scene.add( controller1 );
+            const controller2 = renderer.xr.getController( 1 );
+            controller2.add( new THREE.Line( geometry ) );
+            scene.add( controller2 );
+            // for VR controllers
+            const controllerModelFactory = new XRControllerModelFactory();
+            const controllerGrip1 = renderer.xr.getControllerGrip( 0 );
+            controllerGrip1.add( controllerModelFactory.createControllerModel( controllerGrip1 ) );
+            scene.add( controllerGrip1 );
+            const controllerGrip2 = renderer.xr.getControllerGrip( 1 );
+            controllerGrip2.add( controllerModelFactory.createControllerModel( controllerGrip2 ) );
+            scene.add( controllerGrip2 );
+
+            // light setup
+            sceneLight = new THREE.DirectionalLight(0x888888, 1);
+            sceneLight.position.set(currentParams.lightX, currentParams.lightY, currentParams.lightZ);
+            scene.add(sceneLight);
+            // sphere showing scenelight position
+            const sphereGeo = new THREE.SphereGeometry(0.1, 8, 8);
+            const sphereMat = new THREE.MeshBasicMaterial({ color: currentParams.lightColor });
+            lightSphere = new THREE.Mesh(sphereGeo, sphereMat);
+            lightSphere.position.copy(sceneLight.position);
+            scene.add(lightSphere);
+            // arrow for directional light
+            const dir = new THREE.Vector3().subVectors(new THREE.Vector3(0,0,0), lightSphere.position).normalize();
+            lightArrow = new THREE.ArrowHelper(dir, lightSphere.position, currentParams.Id, currentParams.lightColor);
+            scene.add(lightArrow);
+
+            // room mesh setup
+            room = new THREE.LineSegments(
+                new BoxLineGeometry(20, 20, 10, 20, 20, 10),
+                new THREE.LineBasicMaterial({ color: 0x808080 })
+            );
+            // for VR, changed
+            room.position.y = 10;
+            room.position.z = -1;
+            scene.add(room);
+
+            // platform setup
+            var platGeometry = new THREE.BoxGeometry(5, .5, 5, 16, 16, 4);
+            var platMaterial = new THREE.MeshStandardMaterial({ roughness: 1.0, metalness: 0.0 });
+            var platform = new THREE.Mesh(platGeometry, platMaterial);
+            // for VR, changed
+            platform.position.set(0, 0, -3.5);
+            scene.add(platform);
+
+            // setup video
+            video = document.createElement('video');
+            video.src = 'video.mp4';
+            video.loop = true;
+            video.muted = true;
+            video.crossOrigin = "anonymous";
+            videoTexture = new THREE.VideoTexture(video);
+            video.addEventListener('loadedmetadata', () => {
+                if (currentParams.source === 'Video') updateMeshScaling(videoTexture);
+            });
+
+            // setup image texture
+            // imageTexture = new THREE.TextureLoader().load('grenouille-gaus.jpg');
+            imageTexture = new THREE.TextureLoader().load('grenouille-gaus.jpg', (tex) => {
+                if (currentParams.source === 'Image') updateMeshScaling(imageTexture);
+            });
+
+            // elevation mesh setup
+            // elevation material
+            const eleMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tex: { value: imageTexture },
+                    scaleElevation: { value: currentParams.elevation },
+                    uMode: { value: 0 },
+                    uComponent: { value: 0 },
+                    uLightDirection: { value: new THREE.Vector3(-currentParams.lightX, -currentParams.lightY, -currentParams.lightZ) },
+                    uId: { value: currentParams.Id },
+                    uLightColor: { value: new THREE.Color(currentParams.lightColor) },
+                    uAmbientFactor: { value: currentParams.uAmbientFactor }
+                },
+                vertexShader: document.getElementById('elevationVertex').textContent,
+                fragmentShader: document.getElementById('elevationFragment').textContent,
+                side: THREE.DoubleSide
+            });
+            // elevation geometry
+            const eleGeometry = new THREE.PlaneGeometry(4, 3, 256, 256);
+            // elevation mesh
+            elevationMesh = new THREE.Mesh(eleGeometry, eleMaterial);
+            // for VR, changed
+            elevationMesh.rotation.x = -Math.PI / 2;
+            elevationMesh.rotation.z = 0; 
+            elevationMesh.position.set(0, 0.26, -3.5);
+            scene.add(elevationMesh);
+
+            // reference image setup
+            const refimMaterial = new THREE.MeshBasicMaterial({ map: imageTexture, side: THREE.DoubleSide });
+            baseMesh = new THREE.Mesh(eleGeometry, refimMaterial);
+            // for VR, changed
+            baseMesh.rotation.x = -Math.PI / 2;
+            baseMesh.rotation.z = 0;
+            baseMesh.position.set(0, 0.251, -3.5);
+            scene.add(baseMesh);
+
+            // for VR setup GUI
+            const gui = setupGUI();
+            gui.domElement.style.visibility = 'hidden';
+            const group = new InteractiveGroup();
+            group.listenToPointerEvents( renderer, camera );
+            group.listenToXRControllerEvents( controller1 );
+            group.listenToXRControllerEvents( controller2 );
+            scene.add( group );
+            guiMesh = new HTMLMesh( gui.domElement );
+            guiMesh.position.set(-1, 1.2, -1);
+            guiMesh.rotation.y = Math.PI / 4;
+            guiMesh.scale.setScalar( 2 );
+            group.add( guiMesh );
+
+            // for VR, stats
+            stats = new Stats();
+            stats.dom.style.width = '80px';
+            stats.dom.style.height = '48px';
+            document.body.appendChild( stats.dom );
+            statsMesh = new HTMLMesh( stats.dom );
+            statsMesh.position.set(1, 1.2, -1);
+            statsMesh.rotation.y = -Math.PI / 4;
+            statsMesh.scale.setScalar( 2 );
+            group.add( statsMesh );
+
+            // for VR, commented, handled above
+            // animate();
+        }
+
+        // for VR, new gui/
+        function setupGUI() {
+            const gui = new GUI();
+
+            const valFolder = gui.addFolder('Components & Elevation');
+
+            const sources = ['Image', 'Video'];
+            valFolder.add({
+                cycleSource: () => {
+                    let idx = (sources.indexOf(currentParams.source) + 1) % sources.length;
+                    currentParams.source = sources[idx];
+
+                    const tex = (currentParams.source === 'Video') ? videoTexture : imageTexture;
+                    elevationMesh.material.uniforms.tex.value = tex;
+                    baseMesh.material.map = tex;
+                    updateMeshScaling(tex);
+
+                    if (currentParams.source === 'Video') video.play(); else video.pause();
+                    updatePlayPauseLabel();
+                    sourceBtn.name('Source: ' + currentParams.source);
+                }
+            }, 'cycleSource').name('Source: ' + currentParams.source).listen();
+            let sourceBtn = valFolder.controllers[valFolder.controllers.length - 1];
+
+            valFolder.add(currentParams, 'elevation', 0, 5).onChange(v => {
+                elevationMesh.material.uniforms.scaleElevation.value = v;
+            });
+
+            const lightFolder = gui.addFolder('Lighting');
+            lightFolder.add(currentParams, 'uAmbientFactor', 0, 1).name('Ambient factor').onChange(v => {
+                elevationMesh.material.uniforms.uAmbientFactor.value = v;
+            });
+            lightFolder.add(currentParams, 'Id', 0, 1).name('Light intensity').onChange(v => {
+                elevationMesh.material.uniforms.uId.value = v;
+                if (lightArrow) {
+                    lightArrow.setLength(v);
+                }
+            });
+            // for VR, comment, no color picker in VR
+            // lightFolder.addColor(currentParams, 'lightColor').name('Light Color').onChange(v => {
+            //     elevationMesh.material.uniforms.uLightColor.value.set(v);
+            //     sceneLight.color.set(v);
+            //     lightSphere.material.color.set(v);
+            //     lightArrow.setColor(new THREE.Color(v));
+            // });
+            const updateLightDir = () => {
+                elevationMesh.material.uniforms.uLightDirection.value.set(
+                    -currentParams.lightX, 
+                    -currentParams.lightY, 
+                    -currentParams.lightZ
+                );
+
+                if (sceneLight) {
+                    sceneLight.position.set(
+                        currentParams.lightX, 
+                        currentParams.lightY, 
+                        currentParams.lightZ
+                    );
+
+                    lightSphere.position.copy(sceneLight.position);
+                    lightArrow.position.copy(sceneLight.position);
+                    const newDir = new THREE.Vector3().subVectors(new THREE.Vector3(0,0,0), lightSphere.position).normalize();
+                    lightArrow.setDirection(newDir);
+                }
+            };
+            lightFolder.add(currentParams, 'lightX', -3, 0).name('Light X').onChange(updateLightDir);
+            lightFolder.add(currentParams, 'lightY', 1, 5).name('Light Y').onChange(updateLightDir);
+            lightFolder.add(currentParams, 'lightZ', -3, 0).name('Light Z').onChange(updateLightDir);
+
+            const spaceKeys = Object.keys(spaces);
+            valFolder.add({
+                cycleSpace: () => {
+                    let idx = (spaceKeys.indexOf(currentParams.space) + 1) % spaceKeys.length;
+                    currentParams.space = spaceKeys[idx];
+                    spaceBtn.name('Space: ' + currentParams.space);
+                    updateComps(currentParams.space);
+                }
+            }, 'cycleSpace').name('Space: ' + currentParams.space);
+            let spaceBtn = valFolder.controllers[valFolder.controllers.length - 1];
+
+            let compBtn;
+            const compAction = {
+                cycleComp: () => {
+                    const comps = spaces[currentParams.space].comps;
+                    let idx = (comps.indexOf(currentParams.component) + 1) % comps.length;
+                    currentParams.component = comps[idx];
+                    compBtn.name('Comp: ' + currentParams.component);
+                    updateShaderUniforms();
+                }
+            };
+            compBtn = valFolder.add(compAction, 'cycleComp').name('Comp: ' + currentParams.component);
+
+            function updateComps(val) {
+                const newComps = spaces[val].comps;
+                currentParams.component = newComps[0];
+                compBtn.name('Comp: ' + currentParams.component);
+                updateShaderUniforms();
+            }
+
+            function updateShaderUniforms() {
+                const spaceInfo = spaces[currentParams.space];
+                elevationMesh.material.uniforms.uMode.value = spaceInfo.mode;
+                elevationMesh.material.uniforms.uComponent.value = spaceInfo.comps.indexOf(currentParams.component);
+            }
+
+            const vidFolder = gui.addFolder('Video Controls');
+            playPauseBtn = vidFolder.add(currentParams, 'togglePlay').name('Play');
+            vidFolder.add(currentParams, 'forward10').name('+10 Sec');
+
+            updatePlayPauseLabel();
+
+            return gui;
+        } // end of VR gui
+
+        // for VR, comment; previous gui
+        // function setupGUI() {
+        //     const gui = new GUI();
+
+        //     const valFolder = gui.addFolder('Components & Elevation');
+
+        //     valFolder.add(currentParams, 'source', ['Image', 'Video']).onChange(v => {
+        //         const tex = (v === 'Video') ? videoTexture : imageTexture;
+        //         elevationMesh.material.uniforms.tex.value = tex;
+        //         baseMesh.material.map = tex;
+        //         updateMeshScaling(tex);
+        //         if (v === 'Video') video.play(); else video.pause();
+        //         updatePlayPauseLabel();
+        //     });
+
+        //     valFolder.add(currentParams, 'elevation', 0, 5).onChange(v => {
+        //         elevationMesh.material.uniforms.scaleElevation.value = v;
+        //     });
+
+        //     const lightFolder = gui.addFolder('Lighting');
+        //     lightFolder.add(currentParams, 'uAmbientFactor', 0, 1).name('Ambient factor').onChange(v => {
+        //         elevationMesh.material.uniforms.uAmbientFactor.value = v;
+        //     });
+        //     lightFolder.add(currentParams, 'Id', 0, 1).name('Light intensity').onChange(v => {
+        //         elevationMesh.material.uniforms.uId.value = v;
+        //         if (lightArrow) {
+        //             lightArrow.setLength(v);
+        //         }
+        //     });
+        //     lightFolder.addColor(currentParams, 'lightColor').name('Light Color').onChange(v => {
+        //         elevationMesh.material.uniforms.uLightColor.value.set(v);
+        //         sceneLight.color.set(v);
+        //         lightSphere.material.color.set(v);
+        //         lightArrow.setColor(new THREE.Color(v));
+        //     });
+        //     const updateLightDir = () => {
+        //         elevationMesh.material.uniforms.uLightDirection.value.set(
+        //             -currentParams.lightX, 
+        //             -currentParams.lightY, 
+        //             -currentParams.lightZ
+        //         );
+
+        //         if (sceneLight) {
+        //             sceneLight.position.set(
+        //                 currentParams.lightX, 
+        //                 currentParams.lightY, 
+        //                 currentParams.lightZ
+        //             );
+
+        //             lightSphere.position.copy(sceneLight.position);
+        //             lightArrow.position.copy(sceneLight.position);
+        //             const newDir = new THREE.Vector3().subVectors(new THREE.Vector3(0,0,0), lightSphere.position).normalize();
+        //             lightArrow.setDirection(newDir);
+        //         }
+        //     };
+        //     lightFolder.add(currentParams, 'lightX', -20, 20).name('Light X').onChange(updateLightDir);
+        //     lightFolder.add(currentParams, 'lightY', -20, 20).name('Light Y').onChange(updateLightDir);
+        //     lightFolder.add(currentParams, 'lightZ', -20, 20).name('Light Z').onChange(updateLightDir);
+
+        //     const spaceCtrl = valFolder.add(currentParams, 'space', Object.keys(spaces)).onChange(updateComps);
+        //     let compCtrl = valFolder.add(currentParams, 'component', spaces['RGB'].comps).onChange(updateShaderUniforms);
+
+        //     function updateComps(val) {
+        //         const newComps = spaces[val].comps;
+        //         compCtrl.destroy();
+        //         currentParams.component = newComps[0];
+        //         compCtrl = valFolder.add(currentParams, 'component', newComps).onChange(updateShaderUniforms);
+        //         updateShaderUniforms();
+        //     }
+
+        //     function updateShaderUniforms() {
+        //         const spaceInfo = spaces[currentParams.space];
+        //         elevationMesh.material.uniforms.uMode.value = spaceInfo.mode;
+        //         elevationMesh.material.uniforms.uComponent.value = spaceInfo.comps.indexOf(currentParams.component);
+        //     }
+
+        //     const vidFolder = gui.addFolder('Video Controls');
+        //     playPauseBtn = vidFolder.add(currentParams, 'togglePlay').name('Play');
+        //     vidFolder.add(currentParams, 'forward10').name('+10 Sec');
+
+        //     updatePlayPauseLabel();
+
+        //     return gui;
+        // } // end of old gui
+
+        function updatePlayPauseLabel() {
+            if (playPauseBtn) {
+                playPauseBtn.name(video.paused ? 'Play' : 'Pause');
+            }
+        }
+
+        function updateMeshScaling(texture) {
+            const scale = 4.0; // size of the plane
+            let width, height;
+            // getting dimensions 
+            if (texture.image) {
+                width = texture.image.width || texture.image.videoWidth;
+                height = texture.image.height || texture.image.videoHeight;
+            }
+            // error handling
+            if (!width || !height) {
+                width = 1;
+                height = 1;
+            }
+            const factor = height / width;
+            // create new geometry
+            const newEleGeo = new THREE.PlaneGeometry(scale, scale * factor, 256, 256);
+            const newBaseGeo = new THREE.PlaneGeometry(scale, scale * factor, 1, 1);
+            // dispose old geometry
+            if (elevationMesh.geometry) elevationMesh.geometry.dispose();
+            if (baseMesh.geometry) baseMesh.geometry.dispose();
+            // assign new geometry
+            elevationMesh.geometry = newEleGeo;
+            baseMesh.geometry = newBaseGeo;
+        } // end of old gui
+
+        function animate() {
+            // for VR, not needed with renderer.setAnimationLoop
+            // requestAnimationFrame(animate);
+
+            // for VR, commented
+            // controls.update();
+
+            // for VR
+            if (guiMesh && typeof guiMesh.update === 'function') {
+                guiMesh.update();
+            }
+
+            renderer.render(scene, camera);
+
+            // for VR, stats
+            if (stats) stats.update();
+            if (statsMesh) statsMesh.material.map.update();
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>

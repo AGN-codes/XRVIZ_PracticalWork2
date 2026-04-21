@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title></title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body {
+          margin: 0px;
+          overflow: hidden;
+        }
+      </style>
+</head>
+
+<body>
+
+    <script type="x-shader/x-vertex" id="vertexshader">
+        attribute vec3 color;
+        varying vec3 vColor;
+        uniform int uMode; // 0: RGB, 1: HSV, 2: HSV3D, 3: XYZ, 4: xyY, 5: LAB, 6: LCH
+
+        float srgbToLrgb(float c) {
+            return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        vec3 rgb2hsv(vec3 c) {
+            float r = c.r, g = c.g, b = c.b;
+            float cMax = max(r, max(g, b)), cMin = min(r, min(g, b));
+            float delta = cMax - cMin;
+            float h = 0.0, s = (cMax == 0.0) ? 0.0 : delta / cMax, v = cMax;
+            if (delta != 0.0) {
+                if (cMax == r) h = mod((g - b) / delta, 6.0);
+                else if (cMax == g) h = ((b - r) / delta) + 2.0;
+                else h = ((r - g) / delta) + 4.0;
+                h /= 6.0;
+                if (h < 0.0) h += 1.0;
+            }
+            return vec3(h, s, v);
+        }
+
+        vec3 rgb2xyz(vec3 c) {
+            float r = srgbToLrgb(c.r), g = srgbToLrgb(c.g), b = srgbToLrgb(c.b);
+            float x = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b;
+            float y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+            float z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b;
+            return vec3(x, y, z);
+        }
+
+        float helpf(float t) {
+            float delta = 6.0 / 29.0;
+            return (t > pow(delta, 3.0)) ? pow(t, 1.0/3.0) : t / (3.0 * pow(delta, 2.0)) + 4.0/29.0;
+        }
+
+        vec3 xyz2lab(vec3 xyz) {
+            float Xn = 0.95047, Yn = 1.0000001, Zn = 1.08883;
+            float fX = helpf(xyz.x / Xn), fY = helpf(xyz.y / Yn), fZ = helpf(xyz.z / Zn);
+            return vec3(116.0 * fY - 16.0, 500.0 * (fX - fY), 200.0 * (fY - fZ));
+        }
+
+        void main() {
+            vColor = color;
+            vec3 pos;
+
+            if (uMode == 0) { // RGB
+                pos = vec3(color.g, color.b, color.r); 
+            } else if (uMode == 1) { // HSV
+                vec3 hsv = rgb2hsv(color);
+                pos = vec3(hsv.y, hsv.z, hsv.x);
+            } else if (uMode == 2) { // HSV3D
+                vec3 hsv = rgb2hsv(color);
+                float angle = hsv.x * 6.283185;
+                float radius = hsv.y * 0.5;
+                pos = vec3(0.5 + cos(angle) * radius, hsv.z, 0.5 + sin(angle) * radius);
+            } else if (uMode == 3) { // CIEXYZ
+                vec3 xyz = rgb2xyz(color);
+                pos = vec3(xyz.z / 1.08883, xyz.y, xyz.x / 0.95047);
+            } else if (uMode == 4) { // CIExyY
+                vec3 xyz = rgb2xyz(color);
+                float sum = xyz.x + xyz.y + xyz.z;
+                if (sum > 0.0) {
+                    pos = vec3(xyz.y / sum, xyz.y, xyz.x / sum);
+                } else {
+                    pos = vec3(0, 0, 0);
+                }
+            } else if (uMode == 5) { // CIELAB
+                vec3 lab = xyz2lab(rgb2xyz(color));
+                pos = vec3((lab.y + 128.0)/255.0, lab.x/100.0, (lab.z + 128.0)/255.0);
+            } else if (uMode == 6) { // CIELCH
+                vec3 lab = xyz2lab(rgb2xyz(color));
+                float C = length(lab.yz);
+                float H = atan(lab.z, lab.y);
+                if (H < 0.0) H += 6.283185;
+                pos = vec3(C / 181.019, lab.x / 100.0, H / 6.283185);
+            }
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            gl_PointSize = 20.0 / (-mvPosition.z); 
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="glowfragmentshader">
+        varying vec3 vColor;
+        void main() {
+            float l = length(gl_PointCoord - vec2(0.5, 0.5));
+            if (l > 0.5) discard;
+            gl_FragColor = vec4(vColor, 0.5*(1.0 - l*2.0));
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="opaquefragmentshader">
+        varying vec3 vColor;
+        void main() {
+            float l = length(gl_PointCoord - vec2(0.5, 0.5));
+            if (l > 0.25) discard;
+            gl_FragColor = vec4(vColor, 1.0);
+        }
+    </script>
+
+    <script type="x-shader/x-vertex" id="shadowvertexshader">
+        attribute vec3 color;
+        varying vec3 vColor;
+        uniform int uMode; // 0: RGB, 1: HSV, 2: HSV3D, 3: XYZ, 4: xyY, 5: LAB, 6: LCH
+
+        float srgbToLrgb(float c) {
+            return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        vec3 rgb2hsv(vec3 c) {
+            float r = c.r, g = c.g, b = c.b;
+            float cMax = max(r, max(g, b)), cMin = min(r, min(g, b));
+            float delta = cMax - cMin;
+            float h = 0.0, s = (cMax == 0.0) ? 0.0 : delta / cMax, v = cMax;
+            if (delta != 0.0) {
+                if (cMax == r) h = mod((g - b) / delta, 6.0);
+                else if (cMax == g) h = ((b - r) / delta) + 2.0;
+                else h = ((r - g) / delta) + 4.0;
+                h /= 6.0;
+                if (h < 0.0) h += 1.0;
+            }
+            return vec3(h, s, v);
+        }
+
+        vec3 rgb2xyz(vec3 c) {
+            float r = srgbToLrgb(c.r), g = srgbToLrgb(c.g), b = srgbToLrgb(c.b);
+            float x = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b;
+            float y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+            float z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b;
+            return vec3(x, y, z);
+        }
+
+        float helpf(float t) {
+            float delta = 6.0 / 29.0;
+            return (t > pow(delta, 3.0)) ? pow(t, 1.0/3.0) : t / (3.0 * pow(delta, 2.0)) + 4.0/29.0;
+        }
+
+        vec3 xyz2lab(vec3 xyz) {
+            float Xn = 0.95047, Yn = 1.0000001, Zn = 1.08883;
+            float fX = helpf(xyz.x / Xn), fY = helpf(xyz.y / Yn), fZ = helpf(xyz.z / Zn);
+            return vec3(116.0 * fY - 16.0, 500.0 * (fX - fY), 200.0 * (fY - fZ));
+        }
+
+        void main() {
+            vColor = color;
+            vec3 pos;
+
+            if (uMode == 0) { // RGB
+                pos = vec3(color.g, color.b, color.r); 
+            } else if (uMode == 1) { // HSV
+                vec3 hsv = rgb2hsv(color);
+                pos = vec3(hsv.y, hsv.z, hsv.x);
+            } else if (uMode == 2) { // HSV3D
+                vec3 hsv = rgb2hsv(color);
+                float angle = hsv.x * 6.283185;
+                float radius = hsv.y * 0.5;
+                pos = vec3(0.5 + cos(angle) * radius, hsv.z, 0.5 + sin(angle) * radius);
+            } else if (uMode == 3) { // CIEXYZ
+                vec3 xyz = rgb2xyz(color);
+                pos = vec3(xyz.z / 1.08883, xyz.y, xyz.x / 0.95047);
+            } else if (uMode == 4) { // CIExyY
+                vec3 xyz = rgb2xyz(color);
+                float sum = xyz.x + xyz.y + xyz.z;
+                if (sum > 0.0) {
+                    pos = vec3(xyz.y / sum, xyz.y, xyz.x / sum);
+                } else {
+                    pos = vec3(0, 0, 0);
+                }
+            } else if (uMode == 5) { // CIELAB
+                vec3 lab = xyz2lab(rgb2xyz(color));
+                pos = vec3((lab.y + 128.0)/255.0, lab.x/100.0, (lab.z + 128.0)/255.0);
+            } else if (uMode == 6) { // CIELCH
+                vec3 lab = xyz2lab(rgb2xyz(color));
+                float C = length(lab.yz);
+                float H = atan(lab.z, lab.y);
+                if (H < 0.0) H += 6.283185;
+                pos = vec3(C / 181.019, lab.x / 100.0, H / 6.283185);
+            }
+
+            pos.y = 0.001; // position of shadow
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            gl_PointSize = 20.0 / (-mvPosition.z); 
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="shadowfragmentshader">
+        varying vec3 vColor;
+        void main() {
+            float l = length(gl_PointCoord - vec2(0.5, 0.5));
+            if (l > 0.5) discard;
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 0.1 * (1.0 - l * 2.0));
+        }
+    </script>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.183.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.183.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        // the positions have changed because of VR
+
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+        // for VR
+        import { ARButton } from 'three/addons/webxr/ARButton.js'; // AR
+        import { HTMLMesh } from 'three/addons/interactive/HTMLMesh.js';
+        import { InteractiveGroup } from 'three/addons/interactive/InteractiveGroup.js';
+        import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+        import Stats from 'three/addons/libs/stats.module.js'; // stats
+
+        let scene, camera, renderer, controls;
+        let points, glowMat, opaqueMat;
+        let video, videoCanvas, videoCtx, videoTexture, videoPlane;
+        let imageRefMesh, imageDataBuffer;
+        
+        const spaceMap = { 'RGB': 0, 'HSV': 1, 'HSV3D': 2, 'CIEXYZ': 3, 'CIExyY': 4, 'CIELAB': 5, 'CIELCH': 6 };
+        let sourceMode = 'Video';
+        let isLoaded = false;
+
+        let shadowPoints, shadowMat;
+
+        // for VR
+        let guiMesh;
+        let stats, statsMesh; // stats
+
+        // for VR position
+        const VR_FRONT = -2.0; // forward 2 meters
+        const VR_HEIGHT = 1.2; // lift
+
+        init();
+
+        function init() {
+            scene = new THREE.Scene();
+            // AR
+            // scene.background = new THREE.Color(0x1f1f1f); 
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 100);
+            // camera.position.set(1.5, 1.5, 2.5);
+            // for VR position
+            camera.position.set(0, 1.6, 1.0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); // AR
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            renderer.shadowMap.enabled = true;
+            //renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            // renderer.shadowMap.type = THREE.BasicShadowMap;
+            renderer.shadowMap.type = THREE.PCFShadowMap;
+            renderer.shadowMap.needsUpdate = true;
+            // for VR + button
+            renderer.autoClear = false;
+            renderer.setPixelRatio( window.devicePixelRatio );
+            renderer.setSize( window.innerWidth, window.innerHeight );
+            renderer.setAnimationLoop( animate );
+            renderer.xr.enabled = true;
+            document.body.appendChild( ARButton.createButton( renderer ) ); // AR
+            // renderer.setClearColor(0xDFDFDF); // AR
+            renderer.setClearColor(0x000000, 0); // AR
+            // renderer.setClearAlpha(0); // AR
+             
+            // controls setup
+            // for VR, commented
+            // controls = new OrbitControls(camera, renderer.domElement);
+            // controls.target.set(0.5, 0.5, 0.5);
+            // controls.enableDamping = true;
+            // controls.dampingFactor = 0.05;
+            // controls.screenSpacePanning = true;
+            // controls.minDistance = 1;
+            // controls.maxDistance = 50;
+
+            // for VR controllers
+            const geometry = new THREE.BufferGeometry();
+            geometry.setFromPoints( [ new THREE.Vector3( 0, 0, 0 ), new THREE.Vector3( 0, 0, - 5 ) ] );
+            const controller1 = renderer.xr.getController( 0 );
+            controller1.add( new THREE.Line( geometry ) );
+            scene.add( controller1 );
+            const controller2 = renderer.xr.getController( 1 );
+            controller2.add( new THREE.Line( geometry ) );
+            scene.add( controller2 );
+            // for VR controllers
+            const controllerModelFactory = new XRControllerModelFactory();
+            const controllerGrip1 = renderer.xr.getControllerGrip( 0 );
+            controllerGrip1.add( controllerModelFactory.createControllerModel( controllerGrip1 ) );
+            scene.add( controllerGrip1 );
+            const controllerGrip2 = renderer.xr.getControllerGrip( 1 );
+            controllerGrip2.add( controllerModelFactory.createControllerModel( controllerGrip2 ) );
+            scene.add( controllerGrip2 );
+
+            // directional light
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            // dirLight.position.set(0.5, 2, 0.5);
+            // dirLight.target.position.set(0.5, 0, 0.5);
+            // for VR position
+            dirLight.position.set(0, VR_HEIGHT + 2, VR_FRONT);
+            dirLight.target.position.set(0, VR_HEIGHT, VR_FRONT);
+            dirLight.castShadow = true;
+            //
+            dirLight.shadow.camera.near = 0.1;
+            dirLight.shadow.camera.far = 5;
+            dirLight.shadow.camera.left = -1.1;
+            dirLight.shadow.camera.right = 1.1;
+            dirLight.shadow.camera.top = 1.1;
+            dirLight.shadow.camera.bottom = -1;
+            dirLight.shadow.mapSize.width = 512;
+            dirLight.shadow.mapSize.height = 512;
+            scene.add(dirLight);
+            scene.add(dirLight.target);
+
+            // floor setup
+            const floorGeom = new THREE.PlaneGeometry(1, 1);
+            const floorMat = new THREE.ShadowMaterial({ opacity: 0.9 });
+            const floor = new THREE.Mesh(floorGeom, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            // floor.position.set(0.5, 0, 0.5);
+            // for VR position
+            floor.position.set(0, VR_HEIGHT - 0.5, VR_FRONT);
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // grid setup
+            createGrid(1.0, 4, 0x333333);
+
+            // axis setup
+            // addAxisLine(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1.2, 0, 0), 0x00ff00);
+            // addAxisLine(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1.2, 0), 0x0000ff);
+            // addAxisLine(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1.2), 0xff0000);
+            // for VR position
+            addAxisLine(new THREE.Vector3(-0.5, VR_HEIGHT - 0.5, VR_FRONT + 0.5), new THREE.Vector3(0.7, VR_HEIGHT - 0.5, VR_FRONT + 0.5), 0x00ff00);
+            addAxisLine(new THREE.Vector3(-0.5, VR_HEIGHT - 0.5, VR_FRONT + 0.5), new THREE.Vector3(-0.5, VR_HEIGHT + 0.7, VR_FRONT + 0.5), 0x0000ff);
+            addAxisLine(new THREE.Vector3(-0.5, VR_HEIGHT - 0.5, VR_FRONT + 0.5), new THREE.Vector3(-0.5, VR_HEIGHT - 0.5, VR_FRONT - 0.7), 0xff0000);
+
+
+            // Load Initial Image
+            const loader = new THREE.ImageLoader();
+            loader.load('grenouille.jpg', function (image) { // 'rgb-colours-and-the-colour-space.png' / 'allrgb.png' / 'grenouille.jpg'
+                setupImageBuffer(image);
+                createReferenceImage(image);
+                initVideo();
+
+                // for VR setup GUI
+                const gui = setupGUI();
+                gui.domElement.style.visibility = 'hidden';
+                const group = new InteractiveGroup();
+                group.listenToPointerEvents( renderer, camera );
+                group.listenToXRControllerEvents( controller1 );
+                group.listenToXRControllerEvents( controller2 );
+                scene.add( group );
+                guiMesh = new HTMLMesh( gui.domElement );
+                // guiMesh.position.set(-1, 1.2, -1);
+                // guiMesh.rotation.y = Math.PI / 4;
+                // for VR position
+                guiMesh.position.set(-0.8, 1.4, -1.2); 
+                guiMesh.rotation.y = Math.PI / 6;
+                guiMesh.scale.setScalar( 2 );
+                group.add( guiMesh );
+
+                // for VR, stats
+                stats = new Stats();
+                stats.dom.style.width = '80px';
+                stats.dom.style.height = '48px';
+                document.body.appendChild( stats.dom );
+                statsMesh = new HTMLMesh( stats.dom );
+                // statsMesh.position.set(1, 1.2, -1);
+                // statsMesh.rotation.y = -Math.PI / 4;
+                // for VR position
+                statsMesh.position.set(0.8, 1.4, -1.2);
+                statsMesh.rotation.y = -Math.PI / 6;
+                statsMesh.scale.setScalar( 2 );
+                group.add( statsMesh );
+
+            });
+
+            window.addEventListener('resize', onWindowResize);
+
+            // for VR, commented, handled above
+            // animate();
+        }
+
+        function setupImageBuffer(img) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 100; canvas.height = 100;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, 100, 100);
+            imageDataBuffer = ctx.getImageData(0, 0, 100, 100).data;
+        }
+
+        function initVideo() {
+            video = document.createElement('video');
+            video.src = 'video.mp4';
+            video.muted = true;
+            video.loop = true;
+            video.crossOrigin = "anonymous";
+            video.load();
+
+            video.onloadeddata = function () {
+                videoCanvas = document.createElement('canvas');
+                videoCanvas.width = 100; videoCanvas.height = 100;
+                videoCtx = videoCanvas.getContext('2d', { willReadFrequently: true });
+
+                videoTexture = new THREE.VideoTexture(video);
+                const geometry = new THREE.PlaneGeometry(0.4 * (video.videoWidth / video.videoHeight), 0.4);
+                videoPlane = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: videoTexture, side: THREE.DoubleSide }));
+                // videoPlane.rotation.x = -Math.PI / 2; videoPlane.rotation.z = Math.PI / 4;
+                // videoPlane.position.set(1.2, 0.001, 1.2);
+                // for VR position
+                videoPlane.position.set(0, VR_HEIGHT + 0.6, VR_FRONT);
+                scene.add(videoPlane);
+
+                createPointCloud();
+                isLoaded = true;
+                updateSourceVisibility();
+            };
+        }
+
+        function createPointCloud() {
+            const count = 100 * 100;
+            const positions = new Float32Array(count * 3);
+            const colors = new Float32Array(count * 3);
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            glowMat = new THREE.ShaderMaterial({
+                uniforms: { uMode: { value: 0 } },
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('glowfragmentshader').textContent,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthTest: false
+            });
+
+            opaqueMat = new THREE.ShaderMaterial({
+                uniforms: { uMode: { value: 0 } },
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('opaquefragmentshader').textContent,
+                transparent: false,
+                depthTest: true
+            });
+
+
+            points = new THREE.Points(geometry, opaqueMat);
+
+            // for VR position
+            points.position.set(-0.5, VR_HEIGHT - 0.5, VR_FRONT - 0.5);
+
+            points.castShadow = true;
+            points.customDepthMaterial = new THREE.PointsMaterial({ size: 1 });
+
+            scene.add(points);
+
+            shadowMat = new THREE.ShaderMaterial({
+                uniforms: { uMode: { value: 0 } },
+                vertexShader: document.getElementById('shadowvertexshader').textContent,
+                fragmentShader: document.getElementById('shadowfragmentshader').textContent,
+                transparent: true,
+                blending: THREE.NormalBlending,
+                depthWrite: false,
+                depthTest: true
+            });
+            shadowPoints = new THREE.Points(geometry, shadowMat);
+            // for VR position
+            shadowPoints.position.copy(points.position);
+
+            scene.add(shadowPoints);
+        }
+
+        function updatePoints() {
+            if (!isLoaded || !points) return;
+            
+            let data;
+            if (sourceMode === 'Video') {
+                videoCtx.drawImage(video, 0, 0, 100, 100);
+                data = videoCtx.getImageData(0, 0, 100, 100).data;
+            } else {
+                data = imageDataBuffer;
+            }
+
+            const colorsAttr = points.geometry.attributes.color;
+            for (let i = 0; i < data.length; i += 4) {
+                const idx = i / 4;
+                colorsAttr.array[idx * 3] = data[i] / 255;
+                colorsAttr.array[idx * 3 + 1] = data[i + 1] / 255;
+                colorsAttr.array[idx * 3 + 2] = data[i + 2] / 255;
+            }
+            colorsAttr.needsUpdate = true;
+        }
+
+        // for VR, new gui
+        function setupGUI() {
+            const gui = new GUI();
+
+            const sourceFolder = gui.addFolder('Visualization Source');
+            const sources = ['Video', 'Image'];
+            const sourceAction = {
+                cycleSource: () => {
+                    let idx = (sources.indexOf(sourceMode) + 1) % sources.length;
+                    sourceMode = sources[idx];
+                    
+                    sourceBtn.name('Source: ' + sourceMode);
+                    updateSourceVisibility();
+                }
+            };
+            let sourceBtn = sourceFolder.add(sourceAction, 'cycleSource').name('Source: ' + sourceMode);
+
+            const cloudFolder = gui.addFolder('Point Type');
+            const pointStyles = ['Density', 'Opaque'];
+            let currentStyle = 'Opaque'; 
+            const pointAction = {
+                cycleStyle: () => {
+                    let idx = (pointStyles.indexOf(currentStyle) + 1) % pointStyles.length;
+                    currentStyle = pointStyles[idx];
+                    
+                    points.material = (currentStyle === 'Density') ? glowMat : opaqueMat;
+                    styleBtn.name('Point Style: ' + currentStyle);
+                }
+            };
+            let styleBtn = cloudFolder.add(pointAction, 'cycleStyle').name('Point Style: ' + currentStyle);
+
+            const spaceFolder = gui.addFolder('Color Space');
+            const spaceKeys = Object.keys(spaceMap);
+            let currentSpace = spaceKeys[0];
+            
+            const spaceAction = {
+                cycleSpace: () => {
+                    let idx = (spaceKeys.indexOf(currentSpace) + 1) % spaceKeys.length;
+                    currentSpace = spaceKeys[idx];
+                    
+                    const modeValue = spaceMap[currentSpace];
+                    glowMat.uniforms.uMode.value = modeValue;
+                    opaqueMat.uniforms.uMode.value = modeValue;
+                    shadowMat.uniforms.uMode.value = modeValue;
+                    
+                    spaceBtn.name('Space: ' + currentSpace);
+                }
+            };
+            let spaceBtn = spaceFolder.add(spaceAction, 'cycleSpace').name('Space: ' + currentSpace);
+
+            const videoFolder = gui.addFolder('Video Controls');
+            const videoParams = {
+                pausePlay: function () { video.paused ? video.play() : video.pause(); },
+                add10sec: function () { video.currentTime += 10; }
+            };
+            videoFolder.add(videoParams, 'pausePlay').name('Pause/Play');
+            videoFolder.add(videoParams, 'add10sec').name('+10 Seconds');
+
+            return gui;
+        } // end of VR gui
+
+        // old gui
+        // function setupGUI() {
+        //     const gui = new GUI();
+
+        //     const sourceFolder = gui.addFolder('Visualization Source');
+        //     sourceFolder.add({ mode: 'Video' }, 'mode', ['Video', 'Image']).name('Source').onChange(v => {
+        //         sourceMode = v; updateSourceVisibility();
+        //     });
+
+        //     const cloudFolder = gui.addFolder('Point Type');
+        //     cloudFolder.add({ render: 'Opaque' }, 'render', ['Density', 'Opaque']).name('Point Style').onChange(v => {
+        //         points.material = (v === 'Density') ? glowMat : opaqueMat;
+        //     });
+
+        //     const spaceFolder = gui.addFolder('Color Space');
+        //     spaceFolder.add({ space: 'RGB' }, 'space', Object.keys(spaceMap)).name('Space').onChange(v => {
+        //         glowMat.uniforms.uMode.value = spaceMap[v];
+        //         opaqueMat.uniforms.uMode.value = spaceMap[v];
+        //         shadowMat.uniforms.uMode.value = spaceMap[v];
+        //     });
+
+        //     const videoFolder = gui.addFolder('Video Controls');
+        //     const videoParams = {
+        //         pausePlay: function () { video.paused ? video.play() : video.pause(); },
+        //         add10sec: function () { video.currentTime += 10; }
+        //     };
+        //     videoFolder.add(videoParams, 'pausePlay').name('Pause/Play');
+        //     videoFolder.add(videoParams, 'add10sec').name('+10 Seconds');
+        // } // end of old gui
+
+        function updateSourceVisibility() {
+            const isVid = sourceMode === 'Video';
+            videoPlane.visible = isVid;
+            imageRefMesh.visible = !isVid;
+            if (isVid) video.play(); else video.pause();
+        }
+
+        function createReferenceImage(img) {
+            const geometry = new THREE.PlaneGeometry(0.4, 0.4 * (img.height / img.width));
+            imageRefMesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(img), side: THREE.DoubleSide }));
+            // imageRefMesh.rotation.x = -Math.PI / 2; imageRefMesh.rotation.z = Math.PI / 4;
+            // imageRefMesh.position.set(1.2, 0.001, 1.2);
+            // for VR position
+            imageRefMesh.position.set(0, VR_HEIGHT + 0.6, VR_FRONT);
+            scene.add(imageRefMesh);
+        }
+
+        function animate() {
+            // for VR, not needed with renderer.setAnimationLoop
+            // requestAnimationFrame(animate);
+
+            updatePoints();
+
+            // for VR
+            if (guiMesh && typeof guiMesh.update === 'function') {
+                guiMesh.update();
+            }
+
+            // for VR, commented
+            // controls.update();
+
+            renderer.render(scene, camera);
+
+            // for VR, stats
+            if (stats) stats.update();
+            if (statsMesh) statsMesh.material.map.update();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // create grid
+        function createGrid(size, divisions, colorHex) {
+            const halfSize = size / 2;
+            const yMin = VR_HEIGHT - halfSize;
+            const yMax = VR_HEIGHT + halfSize;
+            const zCenter = VR_FRONT;
+            
+            // Bottom Floor
+            const gridBot = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            gridBot.position.set(0, yMin, zCenter);
+            scene.add(gridBot);
+
+            // Top Roof
+            const gridTop = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            gridTop.position.set(0, yMax, zCenter);
+            scene.add(gridTop);
+
+            // Left Wall
+            const gridLeft = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            gridLeft.position.set(-halfSize, VR_HEIGHT, zCenter);
+            gridLeft.rotation.z = Math.PI / 2;
+            scene.add(gridLeft);
+
+            // Right Wall
+            const gridRight = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            gridRight.position.set(halfSize, VR_HEIGHT, zCenter);
+            gridRight.rotation.z = Math.PI / 2;
+            scene.add(gridRight);
+
+            // Back Wall
+            const gridBack = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            gridBack.position.set(0, VR_HEIGHT, zCenter - halfSize);
+            gridBack.rotation.x = Math.PI / 2;
+            scene.add(gridBack);
+
+            // Front Wall
+            const gridFront = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            gridFront.position.set(0, VR_HEIGHT, zCenter + halfSize);
+            gridFront.rotation.x = Math.PI / 2;
+            scene.add(gridFront);
+            
+            // for VR, commented
+            // const halfSize = size / 2;
+
+            // // XY Floor
+            // const gridXY = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            // gridXY.position.set(halfSize, 0, halfSize);
+            // scene.add(gridXY);
+
+            // // XY Roof
+            // const gridXYR = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            // gridXYR.position.set(halfSize, size, halfSize);
+            // scene.add(gridXYR);
+
+            // // YZ Wall
+            // const gridYZ = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            // gridYZ.position.set(0, halfSize, halfSize);
+            // gridYZ.rotation.z = Math.PI / 2;
+            // scene.add(gridYZ);
+
+            // // YZ other Wall
+            // const gridYZO = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            // gridYZO.position.set(size, halfSize, halfSize);
+            // gridYZO.rotation.z = Math.PI / 2;
+            // scene.add(gridYZO);
+
+            // // XZ Wall
+            // const gridXZ = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            // gridXZ.position.set(halfSize, halfSize, 0);
+            // gridXZ.rotation.x = Math.PI / 2;
+            // scene.add(gridXZ);
+
+            // // XZ other Wall
+            // const gridXZO = new THREE.GridHelper(size, divisions, colorHex, colorHex);
+            // gridXZO.position.set(halfSize, halfSize, size);
+            // gridXZO.rotation.x = Math.PI / 2;
+            // scene.add(gridXZO);
+        }
+
+        function addAxisLine(start, end, colorHex) {
+            const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+            const material = new THREE.LineBasicMaterial({ color: colorHex });
+            const line = new THREE.Line(geometry, material);
+            scene.add(line);
+        }
+
+    </script>
+</body>
+</html>
